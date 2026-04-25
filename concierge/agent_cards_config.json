@@ -1,0 +1,7 @@
+{
+  "agents": [
+    {"name": "CustomerOnboardingAgent", "url": "http://localhost:8001/card"},
+    {"name": "DealOnboardingAgent", "url": "http://localhost:8002/card"},
+    {"name": "MarketingIntelligenceAgent", "url": "http://localhost:8003/card"}
+  ]
+}

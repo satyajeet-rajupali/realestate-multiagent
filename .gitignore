@@ -1,0 +1,52 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# Environment variables
+.env
+*.env
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# SQLite databases (auto‑created at runtime)
+*.db
+*.sqlite
+*.sqlite3
+
+# ChromaDB persistent storage (generated at runtime)
+chroma_db/
+
+# LangGraph checkpoints
+checkpoints.sqlite
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs (if you ever write to files)
+*.log
+
+# Any other generated folders
+__pycache__/
