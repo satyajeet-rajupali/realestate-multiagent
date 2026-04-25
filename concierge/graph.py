@@ -28,7 +28,65 @@ class AgentState(TypedDict):
 llm = ChatOllama(model="llama3.2")
 
 # ------------------------------------------------------------------ #
-#  Router node                                                        #
+#  Smart validation node (NEW)                                        #
+# ------------------------------------------------------------------ #
+def validate_intent(state: AgentState, a2a: A2AClient) -> AgentState:
+    user_msg = state["user_request"]
+
+    prompt = f"""You are a strict real‑estate assistant. Examine the user's message and output a JSON object with the following keys:
+
+- "relevant": true if the message is about real‑estate (customers, properties, market risks), false otherwise.
+- "intent": one of "onboard_full_flow" (if user wants to add a customer or property), "query_insights" (for questions about markets, risks, trends), "other" (anything else).
+- "missing_fields": list of required fields that are missing. For "onboard_full_flow", check for customer fields: name, email, budget; and property fields: address, price. If a field is missing and necessary, add it to the list.
+- "clarification_question": a polite question asking for the missing information (only if something is missing, otherwise empty string).
+
+Only output the JSON. Do not write any other text.
+
+User message: "{user_msg}"
+
+JSON:
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    raw = response.content.strip()
+
+    # Extract JSON
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    decision = {
+        "relevant": False,
+        "intent": "other",
+        "missing_fields": [],
+        "clarification_question": ""
+    }
+    if json_match:
+        try:
+            decision = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # If irrelevant, stop early
+    if not decision.get("relevant", False):
+        state["final_response"] = "I'm a real‑estate assistant. Please ask me about properties, customers, or market insights."
+        state["error"] = "IRRELEVANT"  # special flag
+        logger.info("Validation: message is not real‑estate related.")
+        return state
+
+    # If missing fields for onboarding, ask for them
+    missing = decision.get("missing_fields", [])
+    if missing and decision.get("intent") == "onboard_full_flow":
+        question = decision.get("clarification_question") or f"I still need the following information: {', '.join(missing)}. Could you please provide it?"
+        state["final_response"] = question
+        state["error"] = "INCOMPLETE"
+        logger.info(f"Validation: onboarding data incomplete – missing {missing}.")
+        return state
+
+    # Pass through: set the detected intent for the next router
+    state["next_task"] = decision.get("intent", "onboard_full_flow")
+    state["property_details"] = {}
+    logger.info(f"Validation passed. Intent: {state['next_task']}")
+    return state
+
+# ------------------------------------------------------------------ #
+#  Router node (unchanged)                                            #
 # ------------------------------------------------------------------ #
 def router_node(state: AgentState, a2a: A2AClient) -> AgentState:
     user_msg = state["user_request"].lower()
@@ -71,7 +129,7 @@ def router_node(state: AgentState, a2a: A2AClient) -> AgentState:
     return state
 
 # ------------------------------------------------------------------ #
-#  Onboarding nodes                                                   #
+#  Onboarding nodes (unchanged)                                       #
 # ------------------------------------------------------------------ #
 def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     user_text = state["user_request"]
@@ -81,7 +139,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     has_budget = bool(re.search(r'budget\s+\$?(\d[\d,.]*)', user_text, re.IGNORECASE))
 
     if not has_email and not has_budget:
-        # Clearly incomplete – don‘t even call the LLM
         state["error"] = (
             "I need a bit more information to onboard the customer. "
             "Please provide the customer's **email** and **budget**, for example:\n"
@@ -90,7 +147,7 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         logger.warning("Incomplete customer data – no email or budget found in message.")
         return state
 
-    # ---------- LLM extraction (focused prompt) ----------
+    # ---------- LLM extraction ----------
     extract_prompt = (
         'Extract ONLY the customer details from the following text. '
         'Return a JSON object with exactly three keys: "name", "email", "budget". '
@@ -100,7 +157,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     resp = llm.invoke([HumanMessage(content=extract_prompt)])
     raw = resp.content.strip()
 
-    # Try to parse JSON from the response
     details = {}
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
@@ -109,7 +165,7 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         except json.JSONDecodeError:
             pass
 
-    # ---------- Regex fallback for resilience ----------
+    # ---------- Regex fallback ----------
     if not details.get("name"):
         name_match = re.search(r'(?:name\s*)?([A-Z][a-z]+\s[A-Z][a-z]+)', user_text)
         if name_match:
@@ -124,7 +180,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
             details["budget"] = budget_match.group(1).replace(",", "")
 
     # ---------- Final validation ----------
-    # Convert budget to float safely; if it's still missing or invalid, error out.
     try:
         budget_val = float(str(details.get("budget", "")).replace(",", ""))
     except (ValueError, TypeError):
@@ -157,7 +212,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     return state
 
 def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
-    # ---------- Extract property details ----------
     extract_prompt = (
         'Extract ONLY the property details from the following text. '
         'Return a JSON object with exactly four keys: "address", "price", "bedrooms", "bathrooms". '
@@ -175,9 +229,8 @@ def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         except json.JSONDecodeError:
             pass
 
-    # ---------- Regex fallback ----------
+    # Regex fallback
     if not pd.get("address"):
-        # Look for something like "123 Main St"
         addr_match = re.search(r'(\d+\s[\w\s]+(?:Street|St|Ave|Road|Dr|Lane|Way|Blvd)\.?)\b', state["user_request"])
         if addr_match:
             pd["address"] = addr_match.group(1).strip()
@@ -194,12 +247,10 @@ def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         if bath_match:
             pd["bathrooms"] = int(bath_match.group(1))
 
-    # Validate required fields
     if not pd.get("address") or not pd.get("price"):
         state["error"] = "Incomplete property data. Please provide address and price."
         return state
 
-    # Set defaults for missing optional fields
     pd.setdefault("bedrooms", 1)
     pd.setdefault("bathrooms", 1)
 
@@ -251,9 +302,13 @@ def rag_query_node(state: AgentState, a2a: A2AClient) -> AgentState:
     return state
 
 # ------------------------------------------------------------------ #
-#  Aggregate & error                                                  #
+#  Aggregate & error nodes (unchanged)                                #
 # ------------------------------------------------------------------ #
 def aggregate_node(state: AgentState) -> AgentState:
+    # If a final_response was already set by validation, keep it
+    if state.get("final_response"):
+        return state
+
     if state.get("retrieved_chunks"):
         context = "\n".join([c["text"] for c in state["retrieved_chunks"]])
         prompt = f"User: {state['user_request']}\nInsights:\n{context}\nAnswer:"
@@ -275,12 +330,20 @@ def error_node(state: AgentState) -> AgentState:
     return state
 
 # ------------------------------------------------------------------ #
-#  Graph builder (fixed routing, no duplicated edges)                 #
+#  Direct response node (for validation rejections)                   #
+# ------------------------------------------------------------------ #
+def respond_directly(state: AgentState) -> AgentState:
+    # final_response already set by validate_intent, just pass
+    return state
+
+# ------------------------------------------------------------------ #
+#  Graph builder (updated entry)                                      #
 # ------------------------------------------------------------------ #
 def create_graph(a2a_client: A2AClient, checkpointer=None):
     graph = StateGraph(AgentState)
 
     # Nodes
+    graph.add_node("validate_intent", lambda s: validate_intent(s, a2a_client))
     graph.add_node("router", lambda s: router_node(s, a2a_client))
     graph.add_node("customer_onboarding", lambda s: customer_onboarding_node(s, a2a_client))
     graph.add_node("deal_onboarding", lambda s: deal_onboarding_node(s, a2a_client))
@@ -288,8 +351,21 @@ def create_graph(a2a_client: A2AClient, checkpointer=None):
     graph.add_node("rag_query", lambda s: rag_query_node(s, a2a_client))
     graph.add_node("aggregate", aggregate_node)
     graph.add_node("handle_error", error_node)
+    graph.add_node("respond_directly", respond_directly)
 
-    graph.set_entry_point("router")
+    graph.set_entry_point("validate_intent")
+
+    # After validation: if error flag (IRRELEVANT/INCOMPLETE) -> direct response; else -> router
+    def after_validation(state: AgentState):
+        err = state.get("error", "")
+        if err in ("IRRELEVANT", "INCOMPLETE"):
+            return "respond_directly"
+        return "router"
+
+    graph.add_conditional_edges("validate_intent", after_validation, {
+        "respond_directly": "respond_directly",
+        "router": "router"
+    })
 
     # ---- router → next action ----
     def route_next(state: AgentState):
@@ -298,7 +374,6 @@ def create_graph(a2a_client: A2AClient, checkpointer=None):
             return "customer_onboarding"
         if task == "query_insights":
             return "rag_query"
-        # for get_customer / get_property / unknown → just aggregate
         return "aggregate"
 
     graph.add_conditional_edges("router", route_next, {
@@ -308,7 +383,6 @@ def create_graph(a2a_client: A2AClient, checkpointer=None):
     })
 
     # ---- sequential chain with error checks ----
-    # helper: return next node name, or END if no error
     def after_customer(state: AgentState):
         return "deal_onboarding" if not state.get("error") else "handle_error"
 
@@ -338,9 +412,10 @@ def create_graph(a2a_client: A2AClient, checkpointer=None):
         "handle_error": "handle_error"
     })
 
-    # ---- terminal ----
+    # ---- terminal edges ----
     graph.add_edge("aggregate", END)
     graph.add_edge("handle_error", END)
+    graph.add_edge("respond_directly", END)
 
     compiled = graph.compile(checkpointer=checkpointer)
     return compiled
