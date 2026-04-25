@@ -10,7 +10,7 @@ from shared.a2a_client import A2AClient
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------ #
-#  State                                                              #
+#  State
 # ------------------------------------------------------------------ #
 class AgentState(TypedDict):
     session_id: str
@@ -21,100 +21,90 @@ class AgentState(TypedDict):
     property_id: Optional[str]
     property_details: Optional[dict]
     insights_preview: Optional[str]
+    full_insight: Optional[str]
     retrieved_chunks: Optional[List[dict]]
     final_response: Optional[str]
     error: Optional[str]
+    # NEW fields for smart duplicate handling
+    customer_exists: Optional[bool]          # True if newly created, False if already existed
+    property_analysis_status: Optional[str]  # "generated" or "duplicate"
 
 llm = ChatOllama(model="llama3.2")
 
 # ------------------------------------------------------------------ #
-#  Smart validation node (NEW)                                        #
+#  Validate intent (relevance only)
 # ------------------------------------------------------------------ #
 def validate_intent(state: AgentState, a2a: A2AClient) -> AgentState:
     user_msg = state["user_request"]
+    prompt = f"""You are a strict real‑estate assistant. Classify the user message.
 
-    prompt = f"""You are a strict real‑estate assistant. Examine the user's message and output a JSON object with the following keys:
-
+Output a JSON object with:
 - "relevant": true if the message is about real‑estate (customers, properties, market risks), false otherwise.
-- "intent": one of "onboard_full_flow" (if user wants to add a customer or property), "query_insights" (for questions about markets, risks, trends), "other" (anything else).
-- "missing_fields": list of required fields that are missing. For "onboard_full_flow", check for customer fields: name, email, budget; and property fields: address, price. If a field is missing and necessary, add it to the list.
-- "clarification_question": a polite question asking for the missing information (only if something is missing, otherwise empty string).
+- "intent": one of "onboard_full_flow", "query_insights", "get_property", "get_customer", "other"
 
-Only output the JSON. Do not write any other text.
+Do not include any missing field information. Output only the JSON.
 
 User message: "{user_msg}"
 
-JSON:
-"""
+JSON:"""
     response = llm.invoke([HumanMessage(content=prompt)])
     raw = response.content.strip()
-
-    # Extract JSON
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
-    decision = {
-        "relevant": False,
-        "intent": "other",
-        "missing_fields": [],
-        "clarification_question": ""
-    }
+    decision = {"relevant": False, "intent": "other"}
     if json_match:
         try:
             decision = json.loads(json_match.group())
         except json.JSONDecodeError:
             pass
 
-    # If irrelevant, stop early
     if not decision.get("relevant", False):
         state["final_response"] = "I'm a real‑estate assistant. Please ask me about properties, customers, or market insights."
-        state["error"] = "IRRELEVANT"  # special flag
-        logger.info("Validation: message is not real‑estate related.")
+        state["error"] = "IRRELEVANT"
         return state
 
-    # If missing fields for onboarding, ask for them
-    missing = decision.get("missing_fields", [])
-    if missing and decision.get("intent") == "onboard_full_flow":
-        question = decision.get("clarification_question") or f"I still need the following information: {', '.join(missing)}. Could you please provide it?"
-        state["final_response"] = question
-        state["error"] = "INCOMPLETE"
-        logger.info(f"Validation: onboarding data incomplete – missing {missing}.")
-        return state
-
-    # Pass through: set the detected intent for the next router
-    state["next_task"] = decision.get("intent", "onboard_full_flow")
+    state["next_task"] = decision.get("intent", "other")
     state["property_details"] = {}
     logger.info(f"Validation passed. Intent: {state['next_task']}")
     return state
 
 # ------------------------------------------------------------------ #
-#  Router node (unchanged)                                            #
+#  Router node (with extended keywords)
 # ------------------------------------------------------------------ #
 def router_node(state: AgentState, a2a: A2AClient) -> AgentState:
     user_msg = state["user_request"].lower()
 
-    # ---------- keyword shortcuts (no LLM needed) ----------
-    if any(phrase in user_msg for phrase in ["add customer", "onboard", "new customer", "add his property", "add her property"]):
+    # ---- onboarding keywords ----
+    if any(phrase in user_msg for phrase in ["add customer", "onboard", "new customer", "add property", "add his property", "add her property"]):
         state["next_task"] = "onboard_full_flow"
         state["property_details"] = {}
         logger.info("Router decided (keyword): onboard_full_flow")
         return state
-
+    # ---- market insights keywords ----
     if any(word in user_msg for word in ["risk", "opportunity", "market", "insight"]):
         state["next_task"] = "query_insights"
         state["property_details"] = {}
         logger.info("Router decided (keyword): query_insights")
         return state
+    # ---- property lookup keywords ----
+    if any(phrase in user_msg for phrase in ["address of the property", "property details", "show property", "what is the address"]):
+        state["next_task"] = "get_property"
+        logger.info("Router decided (keyword): get_property")
+        return state
+    # ---- customer lookup keywords ----
+    if any(phrase in user_msg for phrase in ["customer details", "show customer"]):
+        state["next_task"] = "get_customer"
+        logger.info("Router decided (keyword): get_customer")
+        return state
 
-    # ---------- LLM fallback ----------
+    # ---- LLM fallback ----
     prompt = (
         'You are a concierge routing assistant. Output ONLY a JSON object with '
         '"task" and "entities". Do NOT write anything else.\n'
-        'Tasks: "onboard_full_flow", "query_insights", "get_customer", "get_property"\n'
+        'Tasks: "onboard_full_flow", "query_insights", "get_property", "get_customer"\n'
         f'User request: {state["user_request"]}\nJSON:'
     )
     response = llm.invoke([HumanMessage(content=prompt)])
     raw = response.content.strip()
-
-    # extract first JSON object
     m = re.search(r'\{.*\}', raw, re.DOTALL)
     decision = {"task": "unknown"}
     if m:
@@ -122,24 +112,22 @@ def router_node(state: AgentState, a2a: A2AClient) -> AgentState:
             decision = json.loads(m.group())
         except json.JSONDecodeError:
             pass
-
     state["next_task"] = decision.get("task", "unknown")
     state["property_details"] = decision.get("entities", {})
     logger.info(f"Router decided (LLM): {state['next_task']}")
     return state
 
 # ------------------------------------------------------------------ #
-#  Onboarding nodes (unchanged)                                       #
+#  Onboarding nodes (improved error handling & duplicate awareness)
 # ------------------------------------------------------------------ #
 def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     user_text = state["user_request"]
-
-    # ---------- Pre‑check: does the message contain an email or a budget? ----------
     has_email = bool(re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_text))
     has_budget = bool(re.search(r'budget\s+\$?(\d[\d,.]*)', user_text, re.IGNORECASE))
 
+    # ----- Friendly insufficient data message (no error flag) -----
     if not has_email and not has_budget:
-        state["error"] = (
+        state["final_response"] = (
             "I need a bit more information to onboard the customer. "
             "Please provide the customer's **email** and **budget**, for example:\n"
             "`Add customer Jane Doe, email jane@example.com, budget 350000.`"
@@ -147,7 +135,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         logger.warning("Incomplete customer data – no email or budget found in message.")
         return state
 
-    # ---------- LLM extraction ----------
     extract_prompt = (
         'Extract ONLY the customer details from the following text. '
         'Return a JSON object with exactly three keys: "name", "email", "budget". '
@@ -156,7 +143,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     )
     resp = llm.invoke([HumanMessage(content=extract_prompt)])
     raw = resp.content.strip()
-
     details = {}
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
@@ -165,7 +151,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         except json.JSONDecodeError:
             pass
 
-    # ---------- Regex fallback ----------
     if not details.get("name"):
         name_match = re.search(r'(?:name\s*)?([A-Z][a-z]+\s[A-Z][a-z]+)', user_text)
         if name_match:
@@ -179,14 +164,13 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         if budget_match:
             details["budget"] = budget_match.group(1).replace(",", "")
 
-    # ---------- Final validation ----------
     try:
         budget_val = float(str(details.get("budget", "")).replace(",", ""))
     except (ValueError, TypeError):
         budget_val = None
 
     if not details.get("name") or not details.get("email") or budget_val is None or budget_val <= 0:
-        state["error"] = (
+        state["final_response"] = (
             "Incomplete customer data. Please make sure you include:\n"
             "- **name** (e.g., John Doe)\n"
             "- **email** (e.g., john@example.com)\n"
@@ -195,7 +179,6 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         )
         return state
 
-    # ---------- Call the Customer Agent ----------
     try:
         result = a2a.call("onboard_customer", params={
             "name": str(details["name"]),
@@ -204,7 +187,9 @@ def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         })
         if result["status"] == "success":
             state["customer_id"] = result["data"]["customer_id"]
-            logger.info(f"Customer onboarded: {state['customer_id']}")
+            # Capture whether customer was just created or already existed
+            state["customer_exists"] = result["data"].get("is_new", True)
+            logger.info(f"Customer onboarded (new={state['customer_exists']}): {state['customer_id']}")
         else:
             state["error"] = result.get("error", "Customer onboarding failed")
     except Exception as e:
@@ -220,7 +205,6 @@ def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
     )
     resp = llm.invoke([HumanMessage(content=extract_prompt)])
     raw = resp.content.strip()
-
     pd = {}
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
@@ -229,9 +213,8 @@ def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         except json.JSONDecodeError:
             pass
 
-    # Regex fallback
     if not pd.get("address"):
-        addr_match = re.search(r'(\d+\s[\w\s]+(?:Street|St|Ave|Road|Dr|Lane|Way|Blvd)\.?)\b', state["user_request"])
+        addr_match = re.search(r'(\d+\s[\w\s]+(?:Street|St|Ave|Road|Dr|Lane|Way|Blvd|Town)\.?)\b', state["user_request"])
         if addr_match:
             pd["address"] = addr_match.group(1).strip()
     if not pd.get("price"):
@@ -247,8 +230,12 @@ def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
         if bath_match:
             pd["bathrooms"] = int(bath_match.group(1))
 
+    # Friendly error instead of state["error"]
     if not pd.get("address") or not pd.get("price"):
-        state["error"] = "Incomplete property data. Please provide address and price."
+        state["final_response"] = (
+            "Incomplete property data. Please provide address and price. "
+            "For example: `property 123 Main St, price 450000, 3 bed, 2 bath.`"
+        )
         return state
 
     pd.setdefault("bedrooms", 1)
@@ -281,7 +268,10 @@ def marketing_analysis_node(state: AgentState, a2a: A2AClient) -> AgentState:
         })
         if result["status"] == "success":
             state["insights_preview"] = result["data"].get("insight_preview", "")
-            logger.info("Marketing analysis completed.")
+            state["full_insight"] = result["data"].get("full_insight", "")
+            # Capture whether insight was newly generated or duplicate
+            state["property_analysis_status"] = result["data"].get("status", "generated")
+            logger.info(f"Marketing analysis completed (status={state['property_analysis_status']}).")
         else:
             state["error"] = result.get("error", "Marketing analysis failed")
     except Exception as e:
@@ -301,11 +291,35 @@ def rag_query_node(state: AgentState, a2a: A2AClient) -> AgentState:
         state["error"] = str(e)
     return state
 
+def property_lookup_node(state: AgentState, a2a: A2AClient) -> AgentState:
+    pid = state.get("property_id")
+    if not pid:
+        state["final_response"] = "No property has been onboarded yet in this session. Please onboard a property first."
+        return state
+    try:
+        result = a2a.call("get_property", path_params={"property_id": pid})
+        if result["status"] == "success":
+            prop = result["data"]
+            state["final_response"] = (
+                f"Property details:\n"
+                f"- Address: {prop['address']}\n"
+                f"- Price: ${prop['price']:,.2f}\n"
+                f"- Bedrooms: {prop['bedrooms']}\n"
+                f"- Bathrooms: {prop['bathrooms']}\n"
+                f"- Customer ID: {prop['customer_id']}\n"
+                f"- Property ID: {prop['property_id']}"
+            )
+        else:
+            state["error"] = result.get("error", "Property not found")
+    except Exception as e:
+        state["error"] = str(e)
+    return state
+
 # ------------------------------------------------------------------ #
-#  Aggregate & error nodes (unchanged)                                #
+#  Aggregate & error (with duplicate-aware messaging)
 # ------------------------------------------------------------------ #
 def aggregate_node(state: AgentState) -> AgentState:
-    # If a final_response was already set by validation, keep it
+    # If a response was already prepared (by validation or error handling), keep it
     if state.get("final_response"):
         return state
 
@@ -317,12 +331,23 @@ def aggregate_node(state: AgentState) -> AgentState:
     else:
         parts = []
         if state.get("customer_id"):
-            parts.append(f"Customer onboarded with ID {state['customer_id']}.")
+            if state.get("customer_exists") is False:
+                parts.append(f"Customer already exists with ID {state['customer_id']}.")
+            else:
+                parts.append(f"Customer onboarded with ID {state['customer_id']}.")
         if state.get("property_id"):
             parts.append(f"Property onboarded with ID {state['property_id']}.")
-        if state.get("insights_preview"):
-            parts.append(f"Market insight preview: {state['insights_preview']}")
-        state["final_response"] = " ".join(parts) if parts else "Operation completed."
+        if state.get("full_insight"):
+            if state.get("property_analysis_status") == "duplicate":
+                parts.append("Property already analysed. Here is the existing report:\n" + state["full_insight"])
+            else:
+                parts.append("Market Intelligence Report:\n" + state["full_insight"])
+        elif state.get("insights_preview"):
+            if state.get("property_analysis_status") == "duplicate":
+                parts.append("Property already analysed. Insight preview: " + state["insights_preview"])
+            else:
+                parts.append("Market insight preview: " + state["insights_preview"])
+        state["final_response"] = "\n\n".join(parts) if parts else "Operation completed."
     return state
 
 def error_node(state: AgentState) -> AgentState:
@@ -330,78 +355,81 @@ def error_node(state: AgentState) -> AgentState:
     return state
 
 # ------------------------------------------------------------------ #
-#  Direct response node (for validation rejections)                   #
-# ------------------------------------------------------------------ #
-def respond_directly(state: AgentState) -> AgentState:
-    # final_response already set by validate_intent, just pass
-    return state
-
-# ------------------------------------------------------------------ #
-#  Graph builder (updated entry)                                      #
+#  Graph builder (adjusted helpers to route friendly messages)
 # ------------------------------------------------------------------ #
 def create_graph(a2a_client: A2AClient, checkpointer=None):
     graph = StateGraph(AgentState)
 
-    # Nodes
+    # add nodes
     graph.add_node("validate_intent", lambda s: validate_intent(s, a2a_client))
     graph.add_node("router", lambda s: router_node(s, a2a_client))
     graph.add_node("customer_onboarding", lambda s: customer_onboarding_node(s, a2a_client))
     graph.add_node("deal_onboarding", lambda s: deal_onboarding_node(s, a2a_client))
     graph.add_node("marketing_analysis", lambda s: marketing_analysis_node(s, a2a_client))
     graph.add_node("rag_query", lambda s: rag_query_node(s, a2a_client))
+    graph.add_node("property_lookup", lambda s: property_lookup_node(s, a2a_client))
     graph.add_node("aggregate", aggregate_node)
     graph.add_node("handle_error", error_node)
-    graph.add_node("respond_directly", respond_directly)
 
     graph.set_entry_point("validate_intent")
 
-    # After validation: if error flag (IRRELEVANT/INCOMPLETE) -> direct response; else -> router
+    # after validation: if irrelevant, stop; else go to router
     def after_validation(state: AgentState):
-        err = state.get("error", "")
-        if err in ("IRRELEVANT", "INCOMPLETE"):
-            return "respond_directly"
-        return "router"
+        return END if state.get("error") == "IRRELEVANT" else "router"
 
     graph.add_conditional_edges("validate_intent", after_validation, {
-        "respond_directly": "respond_directly",
-        "router": "router"
+        "router": "router",
+        END: END
     })
 
-    # ---- router → next action ----
+    # router -> next action
     def route_next(state: AgentState):
         task = state.get("next_task", "")
         if task == "onboard_full_flow":
             return "customer_onboarding"
         if task == "query_insights":
             return "rag_query"
+        if task == "get_property":
+            return "property_lookup"
         return "aggregate"
 
     graph.add_conditional_edges("router", route_next, {
         "customer_onboarding": "customer_onboarding",
         "rag_query": "rag_query",
+        "property_lookup": "property_lookup",
         "aggregate": "aggregate"
     })
 
-    # ---- sequential chain with error checks ----
-    def after_customer(state: AgentState):
+    # onboarding chain helpers that respect final_response (friendly messages)
+    def after_customer(state):
+        if state.get("final_response"):
+            return "aggregate"
         return "deal_onboarding" if not state.get("error") else "handle_error"
 
-    def after_deal(state: AgentState):
+    def after_deal(state):
+        if state.get("final_response"):
+            return "aggregate"
         return "marketing_analysis" if not state.get("error") else "handle_error"
 
-    def after_marketing(state: AgentState):
+    def after_marketing(state):
+        if state.get("final_response"):
+            return "aggregate"
         return "aggregate" if not state.get("error") else "handle_error"
 
-    def after_rag(state: AgentState):
+    def after_rag(state):
+        if state.get("final_response"):
+            return "aggregate"
         return "aggregate" if not state.get("error") else "handle_error"
 
     graph.add_conditional_edges("customer_onboarding", after_customer, {
         "deal_onboarding": "deal_onboarding",
-        "handle_error": "handle_error"
+        "handle_error": "handle_error",
+        "aggregate": "aggregate"
     })
     graph.add_conditional_edges("deal_onboarding", after_deal, {
         "marketing_analysis": "marketing_analysis",
-        "handle_error": "handle_error"
+        "handle_error": "handle_error",
+        "aggregate": "aggregate"
     })
     graph.add_conditional_edges("marketing_analysis", after_marketing, {
         "aggregate": "aggregate",
@@ -412,10 +440,9 @@ def create_graph(a2a_client: A2AClient, checkpointer=None):
         "handle_error": "handle_error"
     })
 
-    # ---- terminal edges ----
+    graph.add_edge("property_lookup", "aggregate")
     graph.add_edge("aggregate", END)
     graph.add_edge("handle_error", END)
-    graph.add_edge("respond_directly", END)
 
     compiled = graph.compile(checkpointer=checkpointer)
     return compiled

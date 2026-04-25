@@ -35,7 +35,7 @@ def get_card():
 
 @app.post("/onboard", response_model=A2AResponse)
 def onboard_customer(req: CustomerOnboardRequest):
-    # ---------- Idempotent: check if email already exists ----------
+    # Check if customer already exists by email
     conn = sqlite3.connect("customer.db")
     c = conn.cursor()
     c.execute("SELECT customer_id FROM customers WHERE email=?", (req.email,))
@@ -44,13 +44,12 @@ def onboard_customer(req: CustomerOnboardRequest):
     if row:
         existing_id = row[0]
         logger.info(f"Customer with email {req.email} already exists, returning existing ID {existing_id}")
-        return A2AResponse(status="success", data={"customer_id": existing_id})
-    
-    # ---------- Otherwise, insert new ----------
+        return A2AResponse(status="success", data={"customer_id": existing_id, "is_new": False})
+
     try:
         cid = insert_customer(req.name, req.email, req.budget)
         logger.info(f"Onboarded customer {cid} ({req.name}, {req.email})")
-        return A2AResponse(status="success", data={"customer_id": cid})
+        return A2AResponse(status="success", data={"customer_id": cid, "is_new": True})
     except Exception as e:
         logger.error(f"Failed to onboard customer: {e}")
         raise HTTPException(status_code=400, detail=str(e))
