@@ -1,11 +1,11 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 
-# Customer
+# ---------- Customer ----------
 class CustomerOnboardRequest(BaseModel):
     name: str
-    email: EmailStr
-    budget: float = Field(gt=0)
+    email: EmailStr               # Pydantic will validate email format
+    budget: float = Field(gt=0)   # must be positive
 
 class CustomerResponse(BaseModel):
     customer_id: str
@@ -13,7 +13,7 @@ class CustomerResponse(BaseModel):
     email: str
     budget: float
 
-# Property / Deal
+# ---------- Property / Deal ----------
 class PropertyOnboardRequest(BaseModel):
     address: str
     price: float = Field(gt=0)
@@ -29,17 +29,17 @@ class PropertyResponse(BaseModel):
     bathrooms: int
     customer_id: str
 
-# Marketing Analysis
+# ---------- Marketing Analysis ----------
 class AnalysisRequest(BaseModel):
     property_id: str
-    property_data: dict
+    property_data: dict          # flexible bag of property attributes
 
 class AnalysisResponse(BaseModel):
     status: str
     insight_preview: Optional[str] = None
     message: Optional[str] = None
 
-# Marketing Query (RAG)
+# ---------- Marketing Query (RAG) ----------
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 3
@@ -51,8 +51,8 @@ class RetrievedChunk(BaseModel):
 class QueryResponse(BaseModel):
     chunks: List[RetrievedChunk]
 
-# A2A envelope
+# ---------- A2A Envelope ----------
 class A2AResponse(BaseModel):
-    status: str  # "success", "error"
+    status: str                  # "success" or "error"
     data: Optional[dict] = None
     error: Optional[str] = None

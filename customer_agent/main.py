@@ -9,11 +9,12 @@ app = FastAPI(title="Customer Onboarding Agent")
 
 @app.on_event("startup")
 def startup():
-    init_db()
+    init_db()   # make sure the customers table exists
     logger.info("Customer Agent started. DB ready.")
 
 @app.get("/card")
 def get_card():
+    # Let the Concierge (or any client) know what this agent can do
     return {
         "agent_name": "CustomerOnboardingAgent",
         "base_url": "http://localhost:8001",
@@ -35,7 +36,7 @@ def get_card():
 
 @app.post("/onboard", response_model=A2AResponse)
 def onboard_customer(req: CustomerOnboardRequest):
-    # Check if customer already exists by email
+    # If the email already exists, return the existing ID instead of an error
     conn = sqlite3.connect("customer.db")
     c = conn.cursor()
     c.execute("SELECT customer_id FROM customers WHERE email=?", (req.email,))
@@ -46,6 +47,7 @@ def onboard_customer(req: CustomerOnboardRequest):
         logger.info(f"Customer with email {req.email} already exists, returning existing ID {existing_id}")
         return A2AResponse(status="success", data={"customer_id": existing_id, "is_new": False})
 
+    # Fresh customer – insert and return the new ID
     try:
         cid = insert_customer(req.name, req.email, req.budget)
         logger.info(f"Onboarded customer {cid} ({req.name}, {req.email})")

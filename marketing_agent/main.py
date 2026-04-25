@@ -9,13 +9,14 @@ from .chroma_store import store_insight_chunks, query_insights, check_property_e
 logger = setup_logger("MarketingAgent")
 app = FastAPI(title="Marketing Intelligence Agent")
 
-# LLM and embeddings (Ollama local)
+# Local models through Ollama – no cloud dependency
 llm = ChatOllama(model="llama3.2")
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
 @app.get("/card")
 def get_card():
+    # Advertise our analysis and retrieval capabilities to the Concierge
     return {
         "agent_name": "MarketingIntelligenceAgent",
         "base_url": "http://localhost:8003",
@@ -39,10 +40,12 @@ def get_card():
 
 @app.post("/analyze", response_model=A2AResponse)
 def analyze_property(req: AnalysisRequest):
+    # Skip if we already have insights for this property
     if check_property_exists(req.property_id):
         logger.warning(f"Property {req.property_id} already analyzed.")
         return A2AResponse(status="success", data={"status": "duplicate", "message": "Already processed."})
 
+    # Ask the LLM to write a short market report
     try:
         prompt = f"""Generate a market intelligence report for the following property:
 Address: {req.property_data.get('address')}
@@ -58,6 +61,7 @@ Include trends, risk signals, and opportunity indicators.
         logger.error(f"LLM generation failed: {e}")
         raise HTTPException(status_code=500, detail="Insight generation error")
 
+    # Split into chunks and create embeddings for storage
     chunks = text_splitter.split_text(insight_text)
     try:
         chunk_embeddings = embeddings.embed_documents(chunks)
@@ -65,7 +69,10 @@ Include trends, risk signals, and opportunity indicators.
         logger.error(f"Embedding error: {e}")
         raise HTTPException(status_code=500, detail="Embedding error")
 
+    # Persist everything to ChromaDB
     store_insight_chunks(req.property_id, chunks, chunk_embeddings)
+
+    # Return a short preview so the Concierge can show something immediately
     preview = insight_text[:200] + "..." if len(insight_text) > 200 else insight_text
     return A2AResponse(status="success", data={
         "status": "generated",
@@ -74,6 +81,7 @@ Include trends, risk signals, and opportunity indicators.
 
 @app.post("/query", response_model=A2AResponse)
 def query_market(req: QueryRequest):
+    # Embed the user's question and retrieve the most relevant chunks
     try:
         q_embedding = embeddings.embed_query(req.query)
         retrieved = query_insights(q_embedding, req.top_k)

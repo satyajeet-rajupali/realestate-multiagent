@@ -1,5 +1,4 @@
 import sys, os
-# Ensure the project root is in sys.path to import shared
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
 import sqlite3
@@ -15,7 +14,7 @@ from .graph import create_graph
 logger = setup_logger("Concierge")
 app = FastAPI(title="Concierge Agent")
 
-# Load agent cards from config file
+# Discover agents by reading their /card endpoints
 config_path = os.path.join(os.path.dirname(__file__), "agent_cards_config.json")
 with open(config_path) as f:
     config = json.load(f)
@@ -33,16 +32,16 @@ for agent in config["agents"]:
 
 a2a_client = A2AClient(cards)
 
-# Checkpointer – correct initialisation
+# Set up checkpointing so failed workflows can be resumed
 db_path = os.path.join(os.path.dirname(__file__), "checkpoints.sqlite")
 sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
 checkpointer = SqliteSaver(sqlite_conn)
-checkpointer.setup()           # creates the necessary tables
+checkpointer.setup()
 
-# Create the graph with the checkpointer
+# Build the LangGraph application with all the nodes and edges
 compiled_graph = create_graph(a2a_client, checkpointer)
 
-# Cleanup on shutdown
+# Cleanup on server shutdown
 @app.on_event("shutdown")
 def shutdown():
     sqlite_conn.close()
@@ -54,6 +53,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(req: ChatRequest):
+    # Fresh state for each conversation turn
     initial_state = {
         "session_id": req.session_id,
         "messages": [],
@@ -75,7 +75,7 @@ def chat(req: ChatRequest):
         logger.exception("Error during graph execution")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Optional: serve a simple HTML UI
+# Simple static HTML UI for quick testing
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
     ui_file = os.path.join(os.path.dirname(__file__), "ui.html")

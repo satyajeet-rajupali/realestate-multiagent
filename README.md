@@ -1,9 +1,8 @@
-
 # 🏠 Federated Multi‑Agent Real Estate System
 ### Agent‑to‑Agent (A2A) Protocol · LangGraph Orchestration · RAG · Streamlit UI
 
 A fully local, open‑source demonstration of a **federated multi‑agent system** for a real estate platform.  
-A central **Concierge Agent** discovers specialized agents via their **Agent Cards**, orchestrates
+A central **Concierge Agent** discovers specialised agents via their **Agent Cards**, orchestrates
 multi‑step workflows, and aggregates responses. The system uses **LangGraph** for stateful
 orchestration, **ChromaDB** for vector storage (RAG), **SQLite** for persistence, and **Ollama**
 for local LLM inference and embeddings.
@@ -12,34 +11,23 @@ for local LLM inference and embeddings.
 
 ## 📐 Architecture
 
-```
- User (CLI / Streamlit)
-        │
-        ▼
-┌─────────────────┐     A2A (REST)     ┌──────────────┬──────────────┬──────────────┐
-│  Concierge Agent │ ─────────────────▶ │ Customer     │  Deal        │ Marketing    │
-│  (FastAPI +      │                    │ Onboarding   │  Onboarding  │ Intelligence │
-│   LangGraph)      │ ◀──────────────── │ (FastAPI)    │  (FastAPI)   │ (FastAPI)    │
-│  Port 8000       │     A2A responses  │ Port 8001    │  Port 8002   │ Port 8003    │
-└─────────────────┘                    └──────┬───────┴──────┬───────┴──────┬───────┘
-                                             │              │              │
-                                        SQLite         SQLite        ChromaDB
-                                      (customers)    (properties)   (embeddings)
-```
+![High‑Level Architecture](./architecture-diagram.png)
 
-- All agents are **independently deployable** (one folder, one process).
-- The **Concierge dynamically discovers** agents by fetching their `/card` endpoints.
-- The **A2A protocol** uses a standard JSON envelope:
-  ```json
-  { "status": "success" | "error", "data": { ... }, "error": "..." }
-  ```
 
-### Core Workflow (LangGraph)
-```
-Customer Onboarding → Deal Onboarding → Marketing Intelligence (store in RAG) → Aggregate
-                                                                                        ↓
-                                                              RAG Query ← Concierge ← User
-```
+### How it works (quick tour)
+
+1. **Streamlit UI** sends a user message to the Concierge (`/chat`).
+2. The **Concierge** runs a LangGraph workflow:
+   - `validate_intent` checks if the request is real‑estate related and what the user wants.
+   - `router` picks the right starting node (customer onboarding, RAG query, property lookup).
+   - For onboarding, it automatically chains `customer_onboarding` → `deal_onboarding` → `marketing_analysis` → `aggregate`.
+3. At each step the Concierge calls the corresponding A2A agent.  
+   Agents communicate via a simple JSON envelope:  
+   ```json
+   { "status": "success" | "error", "data": { ... }, "error": "..." }
+   ```
+4. The final response is returned to the UI.  
+   The workflow state is checkpointed in **SQLite**, so interrupted sessions can be resumed.
 
 ---
 
@@ -53,7 +41,11 @@ Customer Onboarding → Deal Onboarding → Marketing Intelligence (store in RAG
 | Automatic triggering of downstream agents| Marketing Agent is called immediately after property onboarding (no user step).|
 | RAG‑based retrieval & response generation| Marketing stores embeddings in ChromaDB; Concierge queries & synthesises.      |
 | Persistent storage & checkpointing       | SQLite for customers/properties; ChromaDB for vectors; LangGraph SQLite checkpoints |
-| Logging & observability                 | Every agent logs timestamped messages to stdout.                               |
+| Logging & observability                 | Every agent logs timestamped messages to stdout and `agent.log`.               |
+| Smart intent validation                 | A dedicated node filters out unrelated messages and detects incomplete data.    |
+| Duplicate handling                      | Customer and property agents return existing records instead of errors; Marketing returns the existing full insight. |
+| Friendly error messages                 | When data is missing, the assistant clearly asks for the required fields.       |
+| Property & customer lookups             | Follow‑up questions like “What’s the address?” are answered from the database.   |
 
 ---
 
@@ -110,12 +102,9 @@ realestate-multiagent/
 └── README.md
 ```
 
-> All file contents are available in the repository.  
-> Place every file exactly as shown.
-
 ### 2. Install Dependencies
 
-Open a terminal (Command Prompt, PowerShell, Bash) in the **project root** and run:
+Open a terminal in the **project root** and run:
 
 **Windows** (virtual environment recommended):
 ```cmd
@@ -139,7 +128,7 @@ pip install -r concierge/requirements.txt
 
 ### 3. Set PYTHONPATH (so `shared` package is visible)
 
-From the **project root**, set the environment variable:
+From the **project root**:
 
 **Windows (cmd):**
 ```cmd
@@ -154,8 +143,6 @@ $env:PYTHONPATH = (Get-Location).Path
 export PYTHONPATH=$PWD
 ```
 
-> Alternative: add the project root to your IDE’s PYTHONPATH or install the project in editable mode.
-
 ### 4. Start the Agents (4 terminals)
 
 Always from the **project root**.
@@ -169,21 +156,39 @@ Always from the **project root**.
 
 Wait until each terminal shows `Application startup complete`.
 
-### 5. Launch the Streamlit UI (Browser‑based Chat)
+### 5. Launch the Streamlit UI (recommended for testing)
 
 In a **5th terminal**, from the project root:
 ```bash
 streamlit run concierge/streamlit_app.py --server.port 8501
 ```
-Then open your browser to: `http://localhost:8501`
+Then open your browser to: **http://localhost:8501**
+
+> The UI sends messages to the Concierge and displays the assistant’s replies.  
+> It keeps a session ID (shown in the sidebar) so that LangGraph can resume interrupted workflows.
 
 ---
 
 ## 🧪 Sample Test Cases
 
-### ✅ 1. Onboard a Customer & Property (Core Flow)
+You can test the system either through the **Streamlit UI** or with `curl` commands.  
+The Streamlit UI is the easiest way to see all the intelligent behaviour (validation, duplicate handling, friendly errors).
 
-**Using `curl`:**
+### 1. Onboard a Customer & Property (Core Flow)
+
+**Streamlit UI:**  
+Type exactly:
+
+```
+Add customer John Doe, email john@example.com, budget 500000. Then add his property 123 Main St, price 450000, 3 bed, 2 bath.
+```
+
+You should see a response that includes:  
+- Customer onboarded with ID …  
+- Property onboarded with ID …  
+- A full **Market Intelligence Report** with trends, risks, and opportunities.
+
+**Curl (alternative):**
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
@@ -193,16 +198,17 @@ curl -X POST http://localhost:8000/chat \
   }'
 ```
 
-**Expected response (example):**
-```json
-{
-  "status": "success",
-  "response": "Customer onboarded with ID 3f7a... Property onboarded with ID a1b2... Market insight preview: The property at 123 Main St shows strong..."
-}
-```
+### 2. RAG‑based Market Query
 
-### ✅ 2. RAG‑based Market Query
-Replace `<PROPERTY_ID>` with the actual ID returned above.
+After onboarding, you can ask follow‑up questions about that property.
+
+**Streamlit UI:**  
+```
+What are the market risks for property <PROPERTY_ID>?
+```
+(replace `<PROPERTY_ID>` with the actual ID from the onboarding response, or simply rely on the session – the system remembers the last property)
+
+**Curl:**
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
@@ -212,49 +218,83 @@ curl -X POST http://localhost:8000/chat \
   }'
 ```
 
-**Expected:** A synthesised answer based on the chunks retrieved from ChromaDB.
+### 3. Duplicate Handling
 
-### ✅ 3. Error Handling – Incomplete Input
-```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Add a customer but do not give email", "session_id": "err1"}'
+Run the **exact same onboarding message** again. The system will notice that the customer and property already exist and will return the existing records along with the full insight from before.
+
+**Expected (example):**  
+> Customer already exists with ID 3f7a… Property already analysed. Here is the existing report: …
+
+### 4. Friendly Error Messages
+
+Test what happens when data is missing.
+
+**Streamlit UI / Curl:**
 ```
+Add a customer
+```
+The assistant will answer with:
+> I need a bit more information to onboard the customer. Please provide the customer's **email** and **budget**, for example: `Add customer Jane Doe, email jane@example.com, budget 350000.`
 
-**Expected:** An error message explaining that email is required, returned gracefully.
+Test incomplete property data:
+```
+Add property 123 Main St
+```
+The assistant will ask for the price.
 
-### ✅ 4. Streamlit UI
-- Open `http://localhost:8501`.
-- Type the same commands as above and see the system orchestrate in real time.
-- The “New Session” button resets the conversation and checks the checkpointing (LangGraph resumes on the server side).
+### 5. Property & Customer Lookups
+
+After onboarding, you can ask follow‑up questions:
+
+```
+What is the address of the property?
+```
+The system returns the stored address, price, bedrooms, etc.
+
+```
+Show customer details
+```
+Returns the customer information from the database.
+
+### 6. Off‑Topic Rejection
+
+Try a non‑real‑estate message:
+```
+What is the weather like?
+```
+The assistant will politely decline:
+> I'm a real‑estate assistant. Please ask me about properties, customers, or market insights.
 
 ---
 
-## 📁 Deliverables (mapped to the task)
+## 🧰 Tech Stack
 
-| Deliverable                             | Location / Proof                                                                                   |
-|-----------------------------------------|----------------------------------------------------------------------------------------------------|
-| Concierge Agent                         | `concierge/` – FastAPI app with LangGraph orchestration, SQLite checkpointer                       |
-| Customer Onboarding Agent (A2A Server)  | `customer_agent/` – FastAPI, exposes `/onboard` & `/card`                                          |
-| Deal Onboarding Agent (A2A Server)      | `deal_agent/` – FastAPI, exposes `/onboard_property` & `/card`                                     |
-| Marketing Intelligence Agent (A2A Server)| `marketing_agent/` – FastAPI, uses ChromaDB + Ollama, exposes `/analyze`, `/query`, `/card`       |
-| Valid Agent Cards for all agents        | Each agent’s `/card` endpoint; also static `agent_card.json` files                                |
-| Shared utilities                        | `shared/` (A2A client, Pydantic models, logging)                                                  |
-| README                                  | This document                                                                                      |
+| Component          | Technology / Library                | Notes                                    |
+|--------------------|-------------------------------------|------------------------------------------|
+| Orchestration      | **LangGraph** (StateGraph)          | Manages the multi‑step workflow          |
+| Protocol           | **A2A** (JSON over REST)            | Agents describe themselves via `/card`   |
+| Backend Framework  | **FastAPI**                         | Each agent is a standalone FastAPI app   |
+| LLM                | **Ollama** – `llama3.2` (3B)        | Runs entirely locally                    |
+| Embeddings         | **Ollama** – `nomic-embed-text`     | Local embedding model                    |
+| Vector Database    | **ChromaDB** (persistent)           | Stores and retrieves insight chunks      |
+| Persistence        | **SQLite**                          | Customer and property data               |
+| Checkpointing      | **SQLite** (LangGraph saver)        | Resumable workflows                      |
+| Front‑end / Testing| **Streamlit**                       | Interactive chat UI                      |
+| Language           | Python 3.10+                        |                                          |
 
 ---
 
 ## 🔍 Observability & Logging
 
-All agents print structured logs to **stdout**:
-```
-2026-04-24 10:00:00,123 - CustomerAgent - INFO - Onboarded customer 3f7a... (John Doe, john@example.com)
-2026-04-24 10:00:01,456 - DealAgent - INFO - Onboarded property a1b2... (123 Main St)
-2026-04-24 10:00:02,789 - MarketingAgent - INFO - Generated insight for property a1b2...
-2026-04-24 10:00:03,012 - Concierge - INFO - Router decided: onboard_full_flow
-```
+Every agent writes structured logs to **stdout** and to a file `agent.log` (created in the project root).  
+Example log output:
 
-Checkpoint file `checkpoints.sqlite` is created inside `concierge/` upon first graph execution.
+```
+2026-04-25 12:00:01 - CustomerAgent - INFO - Onboarded customer 3f7a... (John Doe, john@example.com)
+2026-04-25 12:00:02 - DealAgent - INFO - Onboarded property a1b2... (123 Main St)
+2026-04-25 12:00:05 - MarketingAgent - INFO - Generated insight for property a1b2...
+2026-04-25 12:00:05 - Concierge - INFO - Validation passed. Intent: onboard_full_flow
+```
 
 ---
 
@@ -262,25 +302,6 @@ Checkpoint file `checkpoints.sqlite` is created inside `concierge/` upon first g
 
 The Concierge uses **LangGraph’s SQLite checkpointer**.  
 If you stop the Concierge during a workflow and restart it, sending a request with the same `session_id` will resume from the last successful node.
-
----
-
-## 🧰 Tech Stack Summary
-
-| Component          | Technology                          |
-|--------------------|-------------------------------------|
-| Orchestration      | LangGraph (StateGraph)              |
-| Protocol           | A2A (JSON over REST)                |
-| Framework          | FastAPI                             |
-| LLM                | Ollama – `llama3.2` (3B)            |
-| Embeddings         | Ollama – `nomic-embed-text`         |
-| Vector DB          | ChromaDB (persistent local)         |
-| Persistence        | SQLite (customers, properties)      |
-| Checkpointing      | SQLite (LangGraph SQLite saver)     |
-| Chat UI            | Streamlit                           |
-| Language           | Python 3.10+                        |
-
-All components are **open‑source** and run **entirely locally**.
 
 ---
 

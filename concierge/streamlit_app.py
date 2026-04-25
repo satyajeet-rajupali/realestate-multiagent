@@ -5,6 +5,7 @@ import time
 
 CONCIERGE_URL = "http://localhost:8000/chat"
 
+# Keep a persistent session ID so conversations can be resumed
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
@@ -15,6 +16,7 @@ if "messages" not in st.session_state:
 
 session_id = st.session_state.session_id
 
+# Sidebar with session info and a reset button
 with st.sidebar:
     st.title("🏠 Concierge")
     st.caption("Federated Multi‑Agent System")
@@ -36,10 +38,12 @@ with st.sidebar:
 st.title("Real Estate Agent")
 st.caption("Powered by LangGraph + A2A Protocol")
 
+# Display all previous messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
+# Handle new user input
 if prompt := st.chat_input("Ask me anything..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -64,7 +68,7 @@ if prompt := st.chat_input("Ask me anything..."):
         except Exception as e:
             response_text = f"❌ An error occurred: {str(e)}"
 
-        # Simulate streaming
+        # Give a fake streaming effect for a nicer feel
         displayed = ""
         for char in response_text:
             displayed += char

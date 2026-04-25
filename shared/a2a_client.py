@@ -5,8 +5,10 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 class A2AClient:
-    """Utility to call agents by task name using their AgentCards."""
+    """Call agents by task name, using the info from their agent cards."""
+
     def __init__(self, cards: Dict[str, Any]):
+        # Build a lookup table: task → {agent, url, endpoint, method}
         self._capability_map = {}
         for name, card in cards.items():
             for cap in card.get("capabilities", []):
@@ -22,8 +24,11 @@ class A2AClient:
             raise ValueError(f"Task '{task}' not found in any agent card.")
         cap = self._capability_map[task]
         url = cap["base_url"] + cap["endpoint"]
+
+        # Inject path parameters if needed (e.g., /customer/{customer_id})
         if path_params:
             url = url.format(**path_params)
+
         method = cap["method"].upper()
         try:
             if method == "POST":

@@ -5,6 +5,7 @@ from typing import Optional
 DB_PATH = "deal.db"
 
 def init_db():
+    """Create the properties table if it doesn't exist yet."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -21,6 +22,7 @@ def init_db():
     conn.close()
 
 def insert_property(address: str, price: float, bedrooms: int, bathrooms: int, customer_id: str) -> str:
+    """Generate a random ID and insert a new property record."""
     pid = str(uuid.uuid4())
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
@@ -32,6 +34,7 @@ def insert_property(address: str, price: float, bedrooms: int, bathrooms: int, c
     return pid
 
 def get_property(pid: str) -> Optional[dict]:
+    """Fetch a single property by ID; return None if not found."""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT * FROM properties WHERE property_id=?", (pid,))

@@ -8,11 +8,13 @@ app = FastAPI(title="Deal Onboarding Agent")
 
 @app.on_event("startup")
 def startup():
+    # Ensure the properties table is ready before we accept requests
     init_db()
     logger.info("Deal Agent started. DB ready.")
 
 @app.get("/card")
 def get_card():
+    # Publish our capabilities so the Concierge can discover us
     return {
         "agent_name": "DealOnboardingAgent",
         "base_url": "http://localhost:8002",
@@ -34,6 +36,7 @@ def get_card():
 
 @app.post("/onboard_property", response_model=A2AResponse)
 def onboard_property(req: PropertyOnboardRequest):
+    # Store a new property and return its details
     try:
         pid = insert_property(req.address, req.price, req.bedrooms, req.bathrooms, req.customer_id)
         logger.info(f"Onboarded property {pid} ({req.address})")
@@ -51,6 +54,7 @@ def onboard_property(req: PropertyOnboardRequest):
 
 @app.get("/property/{property_id}", response_model=A2AResponse)
 def get_property_endpoint(property_id: str):
+    # Look up a property by its ID; return 404 if not found
     prop = get_property(property_id)
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")

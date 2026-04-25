@@ -5,6 +5,7 @@ from typing import Optional
 DB_PATH = "customer.db"
 
 def init_db():
+    # Create the customers table if it doesn't exist yet
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
@@ -19,6 +20,7 @@ def init_db():
     conn.close()
 
 def insert_customer(name: str, email: str, budget: float) -> str:
+    # Generate a unique ID and store the record
     cid = str(uuid.uuid4())
     conn = sqlite3.connect(DB_PATH)
     conn.execute("INSERT INTO customers VALUES (?,?,?,?)", (cid, name, email, budget))
@@ -27,6 +29,7 @@ def insert_customer(name: str, email: str, budget: float) -> str:
     return cid
 
 def get_customer(cid: str) -> Optional[dict]:
+    # Fetch a single customer by ID, return None if not found
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT * FROM customers WHERE customer_id=?", (cid,))
