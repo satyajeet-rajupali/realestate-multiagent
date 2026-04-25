@@ -3,7 +3,9 @@ uvicorn
 pydantic
 chromadb
 langchain
-langchain-community
 python-dotenv
-email-validator
+langchain-community
+langchain-core
 langchain-text-splitters
+email-validator
+torch 
