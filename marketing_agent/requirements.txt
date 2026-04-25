@@ -5,3 +5,5 @@ chromadb
 langchain
 langchain-community
 python-dotenv
+email-validator
+langchain-text-splitters

@@ -27,9 +27,9 @@ class A2AClient:
         method = cap["method"].upper()
         try:
             if method == "POST":
-                resp = requests.post(url, json=params or {}, timeout=30)
+                resp = requests.post(url, json=params or {}, timeout=180)
             elif method == "GET":
-                resp = requests.get(url, params=params or {}, timeout=30)
+                resp = requests.get(url, params=params or {}, timeout=180)
             else:
                 raise ValueError(f"Unsupported method: {method}")
             resp.raise_for_status()

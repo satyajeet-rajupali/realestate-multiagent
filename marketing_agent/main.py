@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
-from langchain.chat_models import ChatOllama
-from langchain.embeddings import OllamaEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.chat_models import ChatOllama
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from shared.logging_config import setup_logger
 from shared.models import AnalysisRequest, QueryRequest, RetrievedChunk, A2AResponse
 from .chroma_store import store_insight_chunks, query_insights, check_property_exists
@@ -39,12 +39,10 @@ def get_card():
 
 @app.post("/analyze", response_model=A2AResponse)
 def analyze_property(req: AnalysisRequest):
-    # Check duplicate
     if check_property_exists(req.property_id):
         logger.warning(f"Property {req.property_id} already analyzed.")
         return A2AResponse(status="success", data={"status": "duplicate", "message": "Already processed."})
 
-    # Generate insight
     try:
         prompt = f"""Generate a market intelligence report for the following property:
 Address: {req.property_data.get('address')}
@@ -60,7 +58,6 @@ Include trends, risk signals, and opportunity indicators.
         logger.error(f"LLM generation failed: {e}")
         raise HTTPException(status_code=500, detail="Insight generation error")
 
-    # Chunk and embed
     chunks = text_splitter.split_text(insight_text)
     try:
         chunk_embeddings = embeddings.embed_documents(chunks)

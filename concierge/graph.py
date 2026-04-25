@@ -1,12 +1,17 @@
 from typing import TypedDict, Optional, List, Dict, Any
 from langgraph.graph import StateGraph, END
-from langchain.chat_models import ChatOllama
-from langchain.schema import HumanMessage
+from langchain_community.chat_models import ChatOllama
+from langchain_core.messages import HumanMessage
 import logging
+import json
+import re
 from shared.a2a_client import A2AClient
 
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------------ #
+#  State                                                              #
+# ------------------------------------------------------------------ #
 class AgentState(TypedDict):
     session_id: str
     messages: List[Dict[str, str]]
@@ -22,45 +27,125 @@ class AgentState(TypedDict):
 
 llm = ChatOllama(model="llama3.2")
 
+# ------------------------------------------------------------------ #
+#  Router node                                                        #
+# ------------------------------------------------------------------ #
 def router_node(state: AgentState, a2a: A2AClient) -> AgentState:
-    prompt = f"""You are a concierge routing assistant. Given the user request, determine the next action.
-Reply with exactly one JSON object containing "task" and "entities".
+    user_msg = state["user_request"].lower()
 
-Available tasks:
-- "onboard_full_flow": if user wants to add a new customer and/or a property.
-- "query_insights": if user asks about market risks, trends, opportunities for a property.
-- "get_customer": if user wants to look up customer by email or ID.
-- "get_property": if user wants to look up property by ID.
+    # ---------- keyword shortcuts (no LLM needed) ----------
+    if any(phrase in user_msg for phrase in ["add customer", "onboard", "new customer", "add his property", "add her property"]):
+        state["next_task"] = "onboard_full_flow"
+        state["property_details"] = {}
+        logger.info("Router decided (keyword): onboard_full_flow")
+        return state
 
-User request: {state["user_request"]}
+    if any(word in user_msg for word in ["risk", "opportunity", "market", "insight"]):
+        state["next_task"] = "query_insights"
+        state["property_details"] = {}
+        logger.info("Router decided (keyword): query_insights")
+        return state
 
-JSON:"""
+    # ---------- LLM fallback ----------
+    prompt = (
+        'You are a concierge routing assistant. Output ONLY a JSON object with '
+        '"task" and "entities". Do NOT write anything else.\n'
+        'Tasks: "onboard_full_flow", "query_insights", "get_customer", "get_property"\n'
+        f'User request: {state["user_request"]}\nJSON:'
+    )
     response = llm.invoke([HumanMessage(content=prompt)])
-    try:
-        decision = eval(response.content)  # simple eval; in production use json.loads
-    except:
-        decision = {"task": "unknown"}
+    raw = response.content.strip()
+
+    # extract first JSON object
+    m = re.search(r'\{.*\}', raw, re.DOTALL)
+    decision = {"task": "unknown"}
+    if m:
+        try:
+            decision = json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+
     state["next_task"] = decision.get("task", "unknown")
     state["property_details"] = decision.get("entities", {})
-    logger.info(f"Router decided: {state['next_task']}")
+    logger.info(f"Router decided (LLM): {state['next_task']}")
     return state
 
+# ------------------------------------------------------------------ #
+#  Onboarding nodes                                                   #
+# ------------------------------------------------------------------ #
 def customer_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
-    extract_prompt = f"""Extract customer details from this text: "{state['user_request']}".
-Return as JSON with keys: name, email, budget. If not present, use empty strings."""
-    resp = llm.invoke([HumanMessage(content=extract_prompt)])
-    try:
-        details = eval(resp.content)
-    except:
-        details = {}
-    if not details.get("name") or not details.get("email") or not details.get("budget"):
-        state["error"] = "Incomplete customer data. Please provide name, email, and budget."
+    user_text = state["user_request"]
+
+    # ---------- Pre‑check: does the message contain an email or a budget? ----------
+    has_email = bool(re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_text))
+    has_budget = bool(re.search(r'budget\s+\$?(\d[\d,.]*)', user_text, re.IGNORECASE))
+
+    if not has_email and not has_budget:
+        # Clearly incomplete – don‘t even call the LLM
+        state["error"] = (
+            "I need a bit more information to onboard the customer. "
+            "Please provide the customer's **email** and **budget**, for example:\n"
+            "`Add customer Jane Doe, email jane@example.com, budget 350000.`"
+        )
+        logger.warning("Incomplete customer data – no email or budget found in message.")
         return state
+
+    # ---------- LLM extraction (focused prompt) ----------
+    extract_prompt = (
+        'Extract ONLY the customer details from the following text. '
+        'Return a JSON object with exactly three keys: "name", "email", "budget". '
+        'Output nothing but the JSON. If a field is missing, use an empty string.\n'
+        f'Text: {user_text}'
+    )
+    resp = llm.invoke([HumanMessage(content=extract_prompt)])
+    raw = resp.content.strip()
+
+    # Try to parse JSON from the response
+    details = {}
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if json_match:
+        try:
+            details = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # ---------- Regex fallback for resilience ----------
+    if not details.get("name"):
+        name_match = re.search(r'(?:name\s*)?([A-Z][a-z]+\s[A-Z][a-z]+)', user_text)
+        if name_match:
+            details["name"] = name_match.group(1).strip()
+    if not details.get("email"):
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_text)
+        if email_match:
+            details["email"] = email_match.group()
+    if not details.get("budget"):
+        budget_match = re.search(r'budget\s+\$?(\d[\d,.]*)', user_text, re.IGNORECASE)
+        if budget_match:
+            details["budget"] = budget_match.group(1).replace(",", "")
+
+    # ---------- Final validation ----------
+    # Convert budget to float safely; if it's still missing or invalid, error out.
+    try:
+        budget_val = float(str(details.get("budget", "")).replace(",", ""))
+    except (ValueError, TypeError):
+        budget_val = None
+
+    if not details.get("name") or not details.get("email") or budget_val is None or budget_val <= 0:
+        state["error"] = (
+            "Incomplete customer data. Please make sure you include:\n"
+            "- **name** (e.g., John Doe)\n"
+            "- **email** (e.g., john@example.com)\n"
+            "- **budget** (e.g., 500000)\n\n"
+            "You can say something like: `Add customer Jane Doe, email jane@example.com, budget 350000.`"
+        )
+        return state
+
+    # ---------- Call the Customer Agent ----------
     try:
         result = a2a.call("onboard_customer", params={
-            "name": details["name"],
-            "email": details["email"],
-            "budget": float(details["budget"])
+            "name": str(details["name"]),
+            "email": str(details["email"]),
+            "budget": budget_val
         })
         if result["status"] == "success":
             state["customer_id"] = result["data"]["customer_id"]
@@ -68,27 +153,61 @@ Return as JSON with keys: name, email, budget. If not present, use empty strings
         else:
             state["error"] = result.get("error", "Customer onboarding failed")
     except Exception as e:
-        state["error"] = str(e)
+        state["error"] = f"Customer onboarding failed: {str(e)}"
     return state
 
 def deal_onboarding_node(state: AgentState, a2a: A2AClient) -> AgentState:
-    if not state.get("property_details") or not state["property_details"].get("address"):
-        extract_prompt = f"""Extract property details from this text: "{state['user_request']}".
-Return as JSON with keys: address, price, bedrooms, bathrooms. If not present, use empty strings."""
-        resp = llm.invoke([HumanMessage(content=extract_prompt)])
+    # ---------- Extract property details ----------
+    extract_prompt = (
+        'Extract ONLY the property details from the following text. '
+        'Return a JSON object with exactly four keys: "address", "price", "bedrooms", "bathrooms". '
+        'Output nothing but the JSON. Do not include customer information.\n'
+        f'Text: {state["user_request"]}'
+    )
+    resp = llm.invoke([HumanMessage(content=extract_prompt)])
+    raw = resp.content.strip()
+
+    pd = {}
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if json_match:
         try:
-            state["property_details"] = eval(resp.content)
-        except:
-            state["property_details"] = {}
-    pd = state["property_details"]
+            pd = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # ---------- Regex fallback ----------
+    if not pd.get("address"):
+        # Look for something like "123 Main St"
+        addr_match = re.search(r'(\d+\s[\w\s]+(?:Street|St|Ave|Road|Dr|Lane|Way|Blvd)\.?)\b', state["user_request"])
+        if addr_match:
+            pd["address"] = addr_match.group(1).strip()
+    if not pd.get("price"):
+        price_match = re.search(r'price\s+\$?(\d+(?:,\d{3})*(?:\.\d+)?)', state["user_request"], re.IGNORECASE)
+        if price_match:
+            pd["price"] = price_match.group(1).replace(",", "")
+    if not pd.get("bedrooms"):
+        bed_match = re.search(r'(\d+)\s*bed', state["user_request"])
+        if bed_match:
+            pd["bedrooms"] = int(bed_match.group(1))
+    if not pd.get("bathrooms"):
+        bath_match = re.search(r'(\d+)\s*bath', state["user_request"])
+        if bath_match:
+            pd["bathrooms"] = int(bath_match.group(1))
+
+    # Validate required fields
     if not pd.get("address") or not pd.get("price"):
         state["error"] = "Incomplete property data. Please provide address and price."
         return state
+
+    # Set defaults for missing optional fields
+    pd.setdefault("bedrooms", 1)
+    pd.setdefault("bathrooms", 1)
+
     params = {
-        "address": pd["address"],
-        "price": float(pd["price"]),
-        "bedrooms": int(pd.get("bedrooms", 1)),
-        "bathrooms": int(pd.get("bathrooms", 1)),
+        "address": str(pd["address"]),
+        "price": float(str(pd["price"]).replace(",", "")),
+        "bedrooms": int(pd["bedrooms"]),
+        "bathrooms": int(pd["bathrooms"]),
         "customer_id": state.get("customer_id")
     }
     try:
@@ -131,14 +250,13 @@ def rag_query_node(state: AgentState, a2a: A2AClient) -> AgentState:
         state["error"] = str(e)
     return state
 
+# ------------------------------------------------------------------ #
+#  Aggregate & error                                                  #
+# ------------------------------------------------------------------ #
 def aggregate_node(state: AgentState) -> AgentState:
     if state.get("retrieved_chunks"):
         context = "\n".join([c["text"] for c in state["retrieved_chunks"]])
-        prompt = f"""Based on the following market insights, answer the user's question:
-User: {state["user_request"]}
-Insights:
-{context}
-Answer:"""
+        prompt = f"User: {state['user_request']}\nInsights:\n{context}\nAnswer:"
         response = llm.invoke([HumanMessage(content=prompt)])
         state["final_response"] = response.content
     else:
@@ -149,19 +267,20 @@ Answer:"""
             parts.append(f"Property onboarded with ID {state['property_id']}.")
         if state.get("insights_preview"):
             parts.append(f"Market insight preview: {state['insights_preview']}")
-        if not parts:
-            state["final_response"] = "Operation completed."
-        else:
-            state["final_response"] = " ".join(parts)
+        state["final_response"] = " ".join(parts) if parts else "Operation completed."
     return state
 
 def error_node(state: AgentState) -> AgentState:
     state["final_response"] = f"An error occurred: {state.get('error', 'Unknown error')}"
     return state
 
-def create_graph(a2a_client: A2AClient):
+# ------------------------------------------------------------------ #
+#  Graph builder (fixed routing, no duplicated edges)                 #
+# ------------------------------------------------------------------ #
+def create_graph(a2a_client: A2AClient, checkpointer=None):
     graph = StateGraph(AgentState)
-    
+
+    # Nodes
     graph.add_node("router", lambda s: router_node(s, a2a_client))
     graph.add_node("customer_onboarding", lambda s: customer_onboarding_node(s, a2a_client))
     graph.add_node("deal_onboarding", lambda s: deal_onboarding_node(s, a2a_client))
@@ -169,38 +288,59 @@ def create_graph(a2a_client: A2AClient):
     graph.add_node("rag_query", lambda s: rag_query_node(s, a2a_client))
     graph.add_node("aggregate", aggregate_node)
     graph.add_node("handle_error", error_node)
-    
+
     graph.set_entry_point("router")
-    
+
+    # ---- router → next action ----
     def route_next(state: AgentState):
         task = state.get("next_task", "")
         if task == "onboard_full_flow":
             return "customer_onboarding"
-        elif task == "query_insights":
+        if task == "query_insights":
             return "rag_query"
-        elif task in ["get_customer", "get_property"]:
-            return "aggregate"
+        # for get_customer / get_property / unknown → just aggregate
         return "aggregate"
-    
+
     graph.add_conditional_edges("router", route_next, {
         "customer_onboarding": "customer_onboarding",
         "rag_query": "rag_query",
         "aggregate": "aggregate"
     })
-    graph.add_edge("customer_onboarding", "deal_onboarding")
-    graph.add_edge("deal_onboarding", "marketing_analysis")
-    graph.add_edge("marketing_analysis", "aggregate")
-    graph.add_edge("rag_query", "aggregate")
-    
-    def check_error(state: AgentState):
-        return "handle_error" if state.get("error") else END
-    
-    graph.add_conditional_edges("customer_onboarding", check_error, {END: "deal_onboarding", "handle_error": "handle_error"})
-    graph.add_conditional_edges("deal_onboarding", check_error, {END: "marketing_analysis", "handle_error": "handle_error"})
-    graph.add_conditional_edges("marketing_analysis", check_error, {END: "aggregate", "handle_error": "handle_error"})
-    graph.add_conditional_edges("rag_query", check_error, {END: "aggregate", "handle_error": "handle_error"})
-    
+
+    # ---- sequential chain with error checks ----
+    # helper: return next node name, or END if no error
+    def after_customer(state: AgentState):
+        return "deal_onboarding" if not state.get("error") else "handle_error"
+
+    def after_deal(state: AgentState):
+        return "marketing_analysis" if not state.get("error") else "handle_error"
+
+    def after_marketing(state: AgentState):
+        return "aggregate" if not state.get("error") else "handle_error"
+
+    def after_rag(state: AgentState):
+        return "aggregate" if not state.get("error") else "handle_error"
+
+    graph.add_conditional_edges("customer_onboarding", after_customer, {
+        "deal_onboarding": "deal_onboarding",
+        "handle_error": "handle_error"
+    })
+    graph.add_conditional_edges("deal_onboarding", after_deal, {
+        "marketing_analysis": "marketing_analysis",
+        "handle_error": "handle_error"
+    })
+    graph.add_conditional_edges("marketing_analysis", after_marketing, {
+        "aggregate": "aggregate",
+        "handle_error": "handle_error"
+    })
+    graph.add_conditional_edges("rag_query", after_rag, {
+        "aggregate": "aggregate",
+        "handle_error": "handle_error"
+    })
+
+    # ---- terminal ----
     graph.add_edge("aggregate", END)
     graph.add_edge("handle_error", END)
-    
-    return graph.compile()
+
+    compiled = graph.compile(checkpointer=checkpointer)
+    return compiled

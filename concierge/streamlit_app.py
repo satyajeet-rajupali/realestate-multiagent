@@ -33,7 +33,7 @@ with st.sidebar:
     st.write("- Deal Onboarding (`:8002`)")
     st.write("- Marketing Intelligence (`:8003`)")
 
-st.title("Real Estate Concierge")
+st.title("Real Estate Agent")
 st.caption("Powered by LangGraph + A2A Protocol")
 
 for msg in st.session_state.messages:
@@ -52,7 +52,7 @@ if prompt := st.chat_input("Ask me anything..."):
             resp = requests.post(
                 CONCIERGE_URL,
                 json={"message": prompt, "session_id": session_id},
-                timeout=60
+                timeout=180
             )
             if resp.status_code == 200:
                 data = resp.json()

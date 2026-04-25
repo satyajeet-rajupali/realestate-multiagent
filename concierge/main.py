@@ -2,6 +2,7 @@ import sys, os
 # Ensure the project root is in sys.path to import shared
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import json
+import sqlite3
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -32,10 +33,20 @@ for agent in config["agents"]:
 
 a2a_client = A2AClient(cards)
 
-# Checkpointer
+# Checkpointer – correct initialisation
 db_path = os.path.join(os.path.dirname(__file__), "checkpoints.sqlite")
-checkpointer = SqliteSaver.from_conn_string(db_path)
-graph_app = create_graph(a2a_client).with_checkpointer(checkpointer)
+sqlite_conn = sqlite3.connect(db_path, check_same_thread=False)
+checkpointer = SqliteSaver(sqlite_conn)
+checkpointer.setup()           # creates the necessary tables
+
+# Create the graph with the checkpointer
+compiled_graph = create_graph(a2a_client, checkpointer)
+
+# Cleanup on shutdown
+@app.on_event("shutdown")
+def shutdown():
+    sqlite_conn.close()
+    logger.info("Checkpoint database closed")
 
 class ChatRequest(BaseModel):
     message: str
@@ -58,7 +69,7 @@ def chat(req: ChatRequest):
     }
     config = {"configurable": {"thread_id": req.session_id}}
     try:
-        final_state = graph_app.invoke(initial_state, config)
+        final_state = compiled_graph.invoke(initial_state, config)
         return {"status": "success", "response": final_state.get("final_response", "No response.")}
     except Exception as e:
         logger.exception("Error during graph execution")

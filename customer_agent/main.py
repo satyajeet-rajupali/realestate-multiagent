@@ -1,3 +1,4 @@
+import sqlite3
 from fastapi import FastAPI, HTTPException
 from shared.logging_config import setup_logger
 from shared.models import CustomerOnboardRequest, A2AResponse
@@ -34,6 +35,18 @@ def get_card():
 
 @app.post("/onboard", response_model=A2AResponse)
 def onboard_customer(req: CustomerOnboardRequest):
+    # ---------- Idempotent: check if email already exists ----------
+    conn = sqlite3.connect("customer.db")
+    c = conn.cursor()
+    c.execute("SELECT customer_id FROM customers WHERE email=?", (req.email,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        existing_id = row[0]
+        logger.info(f"Customer with email {req.email} already exists, returning existing ID {existing_id}")
+        return A2AResponse(status="success", data={"customer_id": existing_id})
+    
+    # ---------- Otherwise, insert new ----------
     try:
         cid = insert_customer(req.name, req.email, req.budget)
         logger.info(f"Onboarded customer {cid} ({req.name}, {req.email})")
